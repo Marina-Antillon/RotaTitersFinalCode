@@ -1,5 +1,4 @@
 # Seasonality of anti-rotavirus titers in maternal sera in a cohort in Bamako, Mali
-=======================
 
 Administered by Marina Antillon and Meagan C. Fitzpatrick
 School of Medicine
