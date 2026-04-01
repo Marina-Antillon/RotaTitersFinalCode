@@ -1,0 +1,1478 @@
+---
+title: "RotaTiters analysis"
+author: "Dr. Marina Antillon and Prof. Meagan Fitzpatrick"
+date: "31 March 2026"
+output:
+  word_document: 
+    toc: yes
+  pdf_document: default
+---
+
+<!-- # How to use this Rmarkdown -->
+
+<!-- This Rmarkdown document is meant to be used with Rstudio and it outputs a Word document. When you click the **Knit** button at the top left, a Word document will be generated that includes both content as well as the output of any embedded R code chunks within the document. -->
+
+<!-- One may run individual chunks by hitting the green right-facing triangle on the top right of each chunk. -->
+
+<!-- By default, the R code is excluded from the Rmarkdown, as given by the first line of code of the following chunk. Note that the `echo = FALSE` or `echo = TRUE` parameter can be added to each chunk specifically to prevent or dis/enable printing of the R code that generated the table or plot. -->
+
+```{r setup, include=FALSE}
+
+getwd()
+# Whether to print R code
+knitr::opts_chunk$set(echo = FALSE)
+set.seed(123)
+
+# Packages ----------------
+# library("lubridate") # to work with dates
+library("magrittr") # for the pipes: %>% 
+library("ggplot2") # to make graphs
+library("grid") # for annotation layer
+library("readr") # To read csv's
+library("tidyr") # tidy package for data; pivot definitely needs this
+library("dplyr") # other tidy world things: mutate, summarize, group_by
+library("stringr") # to deal with strings
+library("cowplot") # multi-panel plots
+library("ggpubr") # still not a stable version; nec for Jruskall wallis tests on graphs
+library("MASS") # for the mvtnorm distribution
+library("lmtest") # to look at linear model tests and (maybe diagnostics)
+library("moments") # for the Jarque-Bera test for normality
+library("mgcv") # for GAMs
+library("caret") # for the leave-k-out validation that lets me choose splines' k parameter
+library("scales") # to make nice-looking y-axes
+library("flextable") # to output tables that work well in Word/PPT
+library("modelsummary") # to have a neat summary of multiple models at once
+
+# Helpful functions
+fls = list.files("./functions/", pattern="^[fn]")
+for (i in 1:length(fls)){source(paste0("./functions/", fls[i]))}
+
+mean_ci = function(x){c(mean(x), quantile(x, c(0.025, 0.975)))}
+med_iqr = function(x){quantile(x, c(0.5, 0.25, 0.75))}
+
+# Create the "out" dir if not available
+create_dir_if_necessary("./out/")
+
+```
+
+\newpage
+# Objective of the analysis
+
+This is an analysis of Rotavirus antibody titers in a cohort of Malian mothers who enrolled in a study of maternal flu vaccine in 2012 (https://clinicaltrials.gov/study/NCT01430689; https://doi.org/10.1016/S1473-3099(16)30054-8). In 2018-2021, 344 samples out of the original 4000+ samples were assayed for anti-Rotavirus IgA and IgG. Alongside, we will examine the cross-correlation between titers and incidence estimated for the same period (https://doi.org/10.1016/S2214-109X(19)30076-2; https://doi.org/10.1016/S2214-109X(19)30541-8). 
+
+<!-- # Bring in the data -->
+
+```{r calldata, include=F}
+# Nothing in this chunk is shown in the word doc. That's the way it should be.
+
+data = read_csv("./data/synthetic_rotavirus_titers-final.csv") %>%
+    mutate(DOB=paste0("2012-",sprintf("%02d", month_num),"-",sprintf("%02d", day_num))) %>%
+    mutate(DOB=base::as.Date(DOB)) %>% 
+  rename(IgATiter=iga, IgGTiter=igg)
+
+# Make a month variable
+data = data %>% mutate(month = as.numeric(format(DOB, "%m")))
+# it's easier if the DOB variable is just the number of days since Jan 1
+data = data %>% mutate(dayofyear = as.numeric(base::as.Date(DOB) - base::as.Date("2012-01-01")))
+
+# Uncomment this to save the data without the omitted individuals
+# write.csv(data[data$IgATiter>8, c("iid", "mid")], "./data/motherIDsincluded.csv", row.names = F)
+# write.csv(data[data$IgATiter<8, c("iid", "mid")], "./data/motherIDsexcluded.csv", row.names = F)
+
+```
+
+<!-- # Omitting readings of IgA<7.5 U/mL -->
+<!-- The results of this section went into the methods supplement. -->
+
+```{r omitlowIgA, include=F}
+
+# Correlation IgA IgG ----------------
+
+# plot(data$IgATiter, data$IgGTiter)
+
+p1 = data %>% 
+  ggplot(aes(x=IgATiter, y=IgGTiter)) + 
+  geom_point() + 
+  scale_x_log10(limits=c(5, NA)) + scale_y_log10(limits=c(5, NA)) +
+  stat_cor(method = "pearson", label.x = 1, label.y = 4.2) + 
+  ylab("IgA") + xlab(" IgG") + ggtitle("Correlation of IgA and IgG") +
+  theme_bw()
+
+p2 = data %>% filter(IgATiter>7.5) %>%
+  ggplot(aes(x=IgATiter, y=IgGTiter)) + 
+  geom_point() + 
+  scale_x_log10(limits=c(5, NA)) + scale_y_log10(limits=c(5, NA)) +
+  stat_cor(method = "pearson", label.x = 1, label.y = 4.2) + 
+  ylab("IgA") + xlab(" IgG") + ggtitle("Correlation of IgA and IgG") +
+  theme_bw()
+
+pval_pearson_allIgA = with(data, cor.test(log2(IgATiter), log2(IgGTiter))) # parametric
+pval_wilcox_allIgA = with(data, wilcox.test(IgATiter, IgGTiter)) # non-parametric
+
+pval_pearson_subsetIgA = with((data %>% filter(IgATiter>7.5)), cor.test(log2(IgATiter), log2(IgGTiter))) # parametric
+pval_wilcox_subsetIgA = with((data %>% filter(IgATiter>7.5)), wilcox.test(IgATiter, IgGTiter)) # non-parametric
+
+# data %>% group_by(month) %>% 
+#   dplyr::summarize(cor = cor(log2(IgATiter), log2(IgGTiter)),
+#                    cor_lci = cor.test(log2(IgATiter), log2(IgGTiter))$conf.int[1],
+#                    cor_hci = cor.test(log2(IgATiter), log2(IgGTiter))$conf.int[2],
+#                    cor_pvalue = cor.test(log2(IgATiter), log2(IgGTiter))$p.value)
+
+# Undetectable titers (<7.5) ------
+
+IgAtoolow = data %>%
+  group_by(month) %>%
+  summarize(u7 = sum(IgATiter<7.51),
+            o7 = sum(IgATiter>7.5)) %>% 
+  mutate(month = month.name[month])
+
+IgAtoolow_all = data %>%
+  summarize(u7 = sum(IgATiter<7.51),
+            o7 = sum(IgATiter>7.5)) %>%
+  mutate(month = "Total") %>% relocate(month)
+
+data_original = data
+data = data %>% filter(IgATiter>7.5)
+
+```
+
+\newpage
+# Description of the dataset
+
+```{r desc-data, message=F, warning=F, fig.width=6, fig.height=3.5}
+
+## GMTs ----------------------------------------------------
+
+# Demographics
+data %>%
+  dplyr::summarise(Age = mean(mat_age),
+                   Age_IQR = range_pretty(fivenum(mat_age)[c(2,4)]), 
+                   Age_Range = range_pretty(range(mat_age)),
+                   Birthweight = mean(bw),
+                   Birthweight_IQR = range_pretty(fivenum(bw)[c(2,4)]), 
+                   Birthweight_Range =range_pretty(range(bw)),
+                   LBW = mean(bw<2500))
+
+data %>% 
+  dplyr::summarise(Boys = sum(baby_sex==1), Girls = sum(baby_sex==2))
+
+data %>% dplyr::summarize(mean = mean(mat_age), 
+                      IQR = range_pretty(quantile(mat_age, c(0.25, 0.75))),
+                      Range = range_pretty(range(mat_age)))
+
+t.test(data$mat_age, mu=26) # Mat Age
+t.test(data$bw, mu=3217) # BW
+binom.test(sum(data$bw<2500), length(data$month), p = 0.154, alternative = "two.sided") # BW, prop
+binom.test(sum(data$baby_sex==1), length(data$month), p = 0.52, alternative = "two.sided") # Sex of the baby
+
+data %>% 
+  filter(mat_age<18) %>% 
+  mutate(mat_age=floor(mat_age)) %>% 
+  group_by(mat_age) %>% 
+  dplyr::summarise(count = n())
+
+data %>% 
+  ggplot(aes(x=factor(month), y=bw)) + 
+  geom_dotplot(binaxis="y",stackdir='center', binwidth = 50, fill="gray50", color=NA) +
+  geom_boxplot(fill=NA) + 
+  scale_x_discrete(labels=month.abb) + 
+  ylab("Birthweight") + xlab("") + # ggtitle("IgA by month of birth") + 
+  theme_bw() + # theme(plot.title=element_text(hjust=0.5)) + 
+  stat_compare_means(method = "kruskal.test", label.y = 4500, label.x = 2, 
+                     label.sep=": ")
+
+data %>% 
+  ggplot(aes(x=factor(month), y=mat_age)) + 
+  geom_dotplot(binaxis="y",stackdir='center', binwidth = 0.5, fill="gray50", color=NA) +
+  geom_boxplot(fill=NA) + 
+  scale_x_discrete(labels=month.abb) + 
+  ylab("Maternal age") + xlab("") + # ggtitle("IgA by month of birth") + 
+  theme_bw() + # theme(plot.title=element_text(hjust=0.5)) + 
+  stat_compare_means(method = "kruskal.test", label.y = 45, label.x = 2, 
+                     label.sep=": ")
+
+data %>% 
+  ggplot(aes(x=factor(month), fill=factor(baby_sex))) + 
+  geom_bar(position = "fill") + 
+  scale_x_discrete(labels=month.abb) + 
+  ylab("Percent boys") + xlab("") + # ggtitle("IgA by month of birth") + 
+  theme_bw() + theme(legend.position="bottom")
+
+contingency_table <- table(data$month, data$baby_sex)
+chi_squared_test <- chisq.test(contingency_table)
+chi_squared_test
+
+```
+
+# Possible confounders
+
+```{r desc-conf, message=F, warning=F, fig.width=4, fig.height=3}
+
+# Confounders vs the outcome
+# cor.test(data$mat_age, log10(data$IgATiter))$estimate
+# cor.test(data$mat_age, log10(data$IgATiter))$conf.int[1]
+# cor.test(data$mat_age, log10(data$IgATiter))$conf.int[2]
+outcomeA_matage = cor.test(data$mat_age, log10(data$IgATiter))$p.value
+
+# cor.test(data$mat_age, log10(data$IgGTiter))$estimate
+# cor.test(data$mat_age, log10(data$IgGTiter))$conf.int[1]
+# cor.test(data$mat_age, log10(data$IgGTiter))$conf.int[2]
+outcomeG_matage = cor.test(data$mat_age, log10(data$IgGTiter))$p.value
+
+# cor.test(data$bw, log10(data$IgATiter))$estimate
+# cor.test(data$bw, log10(data$IgATiter))$conf.int[1]
+# cor.test(data$bw, log10(data$IgATiter))$conf.int[2]
+outcomeA_bw = cor.test(data$bw, log10(data$IgATiter))$p.value
+
+# cor.test(data$bw, log10(data$IgGTiter))$estimate
+# cor.test(data$bw, log10(data$IgGTiter))$conf.int[1]
+# cor.test(data$bw, log10(data$IgGTiter))$conf.int[2]
+outcomeG_bw = cor.test(data$bw, log10(data$IgGTiter))$p.value
+
+outcomeA_sex = kruskal.test(log10(data$IgATiter), factor(data$baby_sex))$p.value
+outcomeG_sex = kruskal.test(log10(data$IgGTiter), factor(data$baby_sex))$p.value
+
+# Exposures vs the outcome
+exposure_matage = kruskal.test(data$mat_age, factor(data$month))$p.value
+exposure_bw = kruskal.test(data$bw, factor(data$month))$p.value
+exposure_sex = chisq.test(data$baby_sex, data$month)$p.value
+
+confounders_tbl = data.frame(Confounder = c("Maternal Age", "Birthweight", "Infant Sex"),
+                    IgA = c(outcomeA_matage, outcomeA_bw, outcomeA_sex),
+                    IgG = c(outcomeG_matage, outcomeG_bw, outcomeG_sex),
+                    Month = c(exposure_matage, exposure_bw, exposure_sex))
+
+confounders_tbl %>%
+  as_flextable(show_coltype=F) %>% 
+  delete_rows(i = 1, part = "footer") %>%
+  align(j=2:4, align = "center", part = "header") %>% 
+  align(j=2:4, align = "center", part = "body") %>% 
+  add_header_row(values = c("", "Outcomes", "Exposure"), colwidths = c(1, 2, 1), top = TRUE) %>%
+  bg(bg = "black", part = "header") %>% 
+  color(color = "white", part = "header") %>% 
+  hline(i=1:2, border=officer::fp_border(style = "solid", width = 1.5), part="header") %>%
+  colformat_double(j=2:4, digits = 3)
+  
+```
+
+# Analysis: descriptive stats and CCF
+
+```{r desc-mob, message=F, warning=F, fig.width=9, fig.height=7}
+
+# By month
+GMT_summaries1 = data %>% 
+  group_by(month) %>% 
+  dplyr::summarize(N = n(), 
+                   IgA_med = ci_string_dec(quantile(IgATiter, c(0.5, 0.25, 0.75)), 0), 
+                   IgA_GMT = ci_string_dec(c(GMT(IgATiter), GMT_CI_se(IgATiter)), 0), 
+                   IgG_med = ci_string_dec(quantile(IgGTiter, c(0.5, 0.25, 0.75)), 0), 
+                   IgG_GMT = ci_string_dec(c(GMT(IgGTiter), GMT_CI_se(IgGTiter)), 0))
+
+GMT_summaries1_graph = data %>% 
+  group_by(month) %>% 
+  dplyr::summarize(N = n(), 
+                   IgA_med = quantile(IgATiter, 0.5), 
+                   IgA_q25 = quantile(IgATiter, 0.25), 
+                   IgA_q75 = quantile(IgATiter, 0.75), 
+                   IgA_GMT = GMT(IgATiter), 
+                   IgA_GMTlci = GMT_CI_se_low(IgATiter), 
+                   IgA_GMTuci = GMT_CI_se_high(IgATiter), 
+                   IgG_med = quantile(IgGTiter, 0.5), 
+                   IgG_q25 = quantile(IgGTiter, 0.25), 
+                   IgG_q75 = quantile(IgGTiter, 0.75), 
+                   IgG_GMT = GMT(IgGTiter), 
+                   IgG_GMTlci = GMT_CI_se_low(IgGTiter), 
+                   IgG_GMTuci = GMT_CI_se_high(IgGTiter))
+
+# Might move this to the supplement or simply combine it with the boxplot.
+GMT_summaries1_ggplot = GMT_summaries1_graph %>%
+  pivot_longer(cols = starts_with(c("IgA", "IgG")),
+               names_to = c("Ab", "measure"),
+               names_pattern = "(.*)_(.*)") %>%
+  pivot_wider(names_from=measure, values_from = value) %>%
+  ggplot(aes(x=as.factor(month))) +
+    geom_point(aes(y=med), color="red") +
+    geom_errorbar(aes(ymin=q25, ymax=q75), color="darkred", linewidth=3) +
+    geom_point(aes(y=GMT), color="blue") +
+    geom_errorbar(aes(ymin=GMTlci, ymax=GMTuci), color="blue", linewidth=2) +
+    facet_wrap(Ab~., scale="free_y", nrow=2) +
+    scale_y_log10() +
+    scale_x_discrete(label=month.abb) +
+    xlab(NULL) +
+    ylab("U/mL (log scale)") +
+    theme_bw()
+
+GMT_summaries_all = data %>% # (whole year)
+  dplyr::summarize(N = n(), 
+                   IgA_med = ci_string_dec(quantile(IgATiter, c(0.5, 0.25, 0.75)), 0), 
+                   IgA_GMT = ci_string_dec(c(GMT(IgATiter), GMT_CI_se(IgATiter)), 0), 
+                   IgG_med = ci_string_dec(quantile(IgGTiter, c(0.5, 0.25, 0.75)), 0), 
+                   IgG_GMT = ci_string_dec(c(GMT(IgGTiter), GMT_CI_se(IgGTiter)), 0))
+
+pval_pearson_allIgA = with(data, cor.test(log2(IgATiter), log2(IgGTiter))) # parametric
+pval_wilcox_allIgA = with(data, wilcox.test(IgATiter, IgGTiter)) # non-parametric
+
+GMT_summaries1 %>% 
+  mutate(Month = month.name[month]) %>%
+  relocate(Month) %>% 
+  dplyr::select(-month) %>%
+  bind_rows((GMT_summaries_all %>% mutate(Month = "All") %>% relocate(Month))) %>%
+  as_flextable(max_row = 13, show_coltype=F) %>% 
+  delete_rows(i = 1, part = "footer") %>%
+  add_header_row(values = c("", "IgA", "IgG"), colwidths = c(2, 2, 2), top = TRUE) %>% 
+  set_header_labels(values = c("Month", "N", "GMT (95% CI)", "Median (IQR)", "GMT (95% CI)", "Median (IQR)")) %>%
+  align(align = "center", part = "header") %>% 
+  bg(bg = "black", part = "header") %>% 
+  color(color = "white", part = "header") %>% 
+  hline(i=1:2, border=officer::fp_border(style = "solid", width = 1.5), part="header") %>%
+  bg(i=13, bg = "gray80", part = "body") %>% 
+  add_footer_lines(value=c("Correlation between IgA and IgG:",
+                   paste0("Parametric test: coefficient: ", my_smallvalue(pval_pearson_allIgA$estimate, 3), " p", my_smallvalue(pval_pearson_allIgA$p.value, 3)),
+                   paste0("Non-parametric test: coefficient: NA", " p", my_smallvalue(pval_wilcox_allIgA$p.value, 3))),
+           top=FALSE)
+
+## Draw Titer Patterns ------------------------------------
+### IgA ----------------------------------------------------
+
+BPd_IgA = ggplot(data, aes(x=DOB, y=IgATiter)) + 
+  geom_point() + 
+  geom_smooth(method=gam, formula=y ~ s(x, bs="cc", k=12)) + 
+  scale_y_log10(limits=c(10, 12000)) + 
+  scale_x_date(limits=as.Date(c("2012-01-01", "2012-12-31"))) + 
+  ylab("") + xlab("") + # ggtitle("IgA by date of birth") + 
+  theme_bw() # + theme(plot.title=element_text(hjust=0.5)) +
+
+BPm_IgA = ggplot(data, aes(x=factor(month), y=IgATiter)) + 
+  geom_dotplot(binaxis="y",stackdir='center',binwidth = 0.05, fill="gray50", color=NA) +
+  geom_boxplot(fill=NA) + 
+  scale_y_log10(limits=c(10, 30000)) + 
+  # scale_y_continuous(limits=c(10, 4000)) +
+  scale_x_discrete(labels=month.abb) + 
+  ylab("IgA (U/mL, log-scale)") + xlab("") + # ggtitle("IgA by month of birth") + 
+  theme_bw() + # theme(plot.title=element_text(hjust=0.5)) + 
+  stat_compare_means(method = "kruskal.test", label.y = 4.25, label.x = 2, 
+                     label.sep=": ")
+
+### IgG ----------------------------------------------------
+
+BPd_IgG = ggplot(data, aes(x=DOB, y=IgGTiter)) + 
+  geom_point() + 
+  geom_smooth(method=gam, formula=y ~ s(x, bs="cc", k=12)) + 
+  # scale_y_log10(limits=c(10, 12000)) + 
+  ylab("") + xlab("") + # ggtitle("IgG by DOB") +
+  scale_x_date(limits=as.Date(c("2012-01-01", "2012-12-31"))) + 
+  theme_bw()
+
+BPm_IgG = ggplot(data, aes(x=factor(month), y=IgGTiter)) + 
+  geom_dotplot(binaxis="y",stackdir='center',binwidth = 0.05, fill="gray50", color=NA) +
+  geom_boxplot(fill=NA) + 
+  # scale_y_log10(limits=c(10, 30000)) + 
+  # scale_y_continuous(limits=c(10, 4000)) +
+  scale_x_discrete(labels=month.abb) + 
+  ylab("IgG (U/mL, log-scale)") + xlab("") + # ggtitle("IgG by MOB") +
+  theme_bw() +
+  stat_compare_means(method = "kruskal.test", label.y = 4.25, label.x = 2, 
+                     label.sep=": ")
+
+BPm_together = data %>%
+  pivot_longer(cols = c(IgATiter, IgGTiter), 
+               names_to = "antibody_type", 
+               values_to = "titer") %>%
+  mutate(antibody_type = factor(antibody_type, 
+                               levels = c("IgATiter", "IgGTiter"),
+                               labels = c("IgA", "IgG"))) %>% 
+  ggplot(aes(x = factor(month), y = titer, fill = antibody_type, color=antibody_type)) +
+  geom_dotplot(binaxis="y", stackdir='center', scale = "width",
+               binwidth = 0.05, fill="gray50",
+               stroke=0, position = position_dodge(width = 0.8),
+               show.legend = F) +
+  # geom_jitter(alpha = 0.6, size = 0.8,
+  #           position = position_jitterdodge(dodge.width = 0.75)) + 
+  geom_boxplot(position = position_dodge(width = 0.75), color = "gray50", width=0.7,
+               outlier.shape = NA,  # Remove outliers as requested
+               alpha = 0.7) +
+  scale_fill_manual(values = c("IgA" = "red", "IgG" = "blue"),
+                    name = "Antibody Type") +
+  scale_color_manual(values = c("IgA" = "red", "IgG" = "blue"),
+                    name = "Antibody Type") +
+  scale_y_log10(labels = scales::comma) +
+  # scale_y_continuous(limits=c(0, 4000), labels = comma,  expand = c(0, 0)) + 
+  # coord_cartesian(ylim = c(0, 4000)) + 
+  scale_x_discrete(labels = month.abb) +
+  labs(x = "Month", 
+       y = "Antibody concentration\n(U/mL, log scale)",
+       title = "IgA and IgG Antibodies") +
+       # subtitle = "Boxplots show median (GMT), IQR, and whiskers without outliers"
+       # caption = "Kruskall-Wallis p-values for homogeneity: IgA = 0.080, IgG = 0.025") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        panel.background = element_blank(),
+        plot.background = element_blank()) 
+
+# Display the plot
+print(BPm_together)
+ggsave("./out/inc_titers.pdf", height = 4.5, width = 6, units="in", dpi=300, bg=NULL)
+
+### all desc graphs together ------
+
+
+load("./out/ccf_gamma_uncertainty_lsd.Rdata")
+monthly_incidence_lsd = monthly_incidence
+load("./out/ccf_gamma_uncertainty_msd.Rdata")
+monthly_incidence_msd = monthly_incidence
+load("./out/ccf_gamma_uncertainty_total.Rdata")
+monthly_incidence_total = monthly_incidence
+
+# From the cross_corr_catalytics code. 
+load("./out/ccf_data_uncertainty_lsd_plot.Rdata")
+p_ccf_uncertainty_lsd = p_ccf_uncertainty
+load("./out/ccf_data_uncertainty_msd_plot.Rdata")
+p_ccf_uncertainty_msd = p_ccf_uncertainty
+load("./out/ccf_data_uncertainty_total_plot.Rdata")
+p_ccf_uncertainty_total = p_ccf_uncertainty
+
+ggmonth1a_lsd = monthly_incidence_lsd[c(3:12, 1:2),] %>% # epi_desc_msd[4:15,] %>% 
+  mutate(Group = as.Date(paste0(Group, "-01"), format="%Y-%m-%d")) %>% 
+  mutate(month = as.numeric(format(Group, "%m"))) %>%
+  mutate(month = factor(month, levels=1:12, labels=month.abb)) %>%
+  mutate(lower = ifelse(lower<0.5, 0.5, lower)) %>% 
+  mutate(mean = ifelse(mean<0.5, 0.5, mean)) %>% 
+ggplot(aes(x=month, y=mean)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = lower, ymax = upper)) + 
+  # geom_vline(aes(xintercept=as.Date("2011-12-15"))) + 
+  theme_bw() + 
+  theme(panel.grid.minor=element_blank(),
+        plot.margin = margin(t = 10, r = 1, b = 1, l = 1),
+        panel.background = element_blank(),
+        plot.background = element_blank()) + 
+  scale_y_log10(limits=c(0.5, 60)) + 
+  # scale_x_date(date_breaks = "1 month",
+    # labels = function(x) format(x, "%b")) + 
+  xlab(NULL) + ylab("Cases per 100 py") + 
+  ggtitle("GEMS-1a, incidence of rotavirus-attributable LSD, children <5y") + 
+  theme(plot.title = element_text(hjust=0.5, size=12))
+
+ggmonth1a_msd = monthly_incidence_msd[c(3:12, 1:2),] %>% # epi_desc_msd[4:15,] %>% 
+  mutate(Group = as.Date(paste0(Group, "-01"), format="%Y-%m-%d")) %>% 
+  mutate(month = as.numeric(format(Group, "%m"))) %>%
+  mutate(month = factor(month, levels=1:12, labels=month.abb)) %>%
+  mutate(lower = ifelse(lower<0.5, 0.5, lower)) %>% 
+  mutate(mean = ifelse(mean<0.5, 0.5, mean)) %>% 
+ggplot(aes(x=month, y=mean)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = lower, ymax = upper)) + 
+  # geom_vline(aes(xintercept=as.Date("2011-12-15"))) + 
+  theme_bw() + 
+  theme(panel.grid.minor=element_blank(),
+        plot.margin = margin(t = 10, r = 1, b = 1, l = 1),
+        panel.background = element_blank(),
+        plot.background = element_blank()) + 
+  scale_y_log10(limits=c(0.5, 60)) + 
+  # scale_x_date(date_breaks = "1 month",
+    # labels = function(x) format(x, "%b")) + 
+  xlab(NULL) + ylab("Cases per 100 py") + 
+  ggtitle("GEMS-1a, incidence of rotavirus-attributable MSD, children <5y") + 
+  theme(plot.title = element_text(hjust=0.5, size=12))
+
+ggmonth1a_total = monthly_incidence_total[c(3:12, 1:2),] %>% # epi_desc_msd[4:15,] %>% 
+  mutate(Group = as.Date(paste0(Group, "-01"), format="%Y-%m-%d")) %>% 
+  mutate(month = as.numeric(format(Group, "%m"))) %>%
+  mutate(month = factor(month, levels=1:12, labels=month.abb)) %>%
+  mutate(lower = ifelse(lower<0.5, 0.5, lower)) %>% 
+  mutate(mean = ifelse(mean<0.5, 0.5, mean)) %>% 
+ggplot(aes(x=month, y=mean)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = lower, ymax = upper)) + 
+  # geom_vline(aes(xintercept=as.Date("2011-12-15"))) + 
+  theme_bw() + 
+  theme(panel.grid.minor=element_blank(),
+        plot.margin = margin(t = 10, r = 1, b = 1, l = 1),
+        panel.background = element_blank(),
+        plot.background = element_blank()) + 
+  scale_y_log10(limits=c(0.5, 60)) + 
+  # scale_y_continuous(limits=c(0, 60)) + 
+  # scale_x_date(date_breaks = "1 month",
+    # labels = function(x) format(x, "%b")) + 
+  xlab(NULL) + ylab("Cases per 100 py") + 
+  ggtitle("GEMS-1a, incidence of rotavirus-attributable diarrhea, children <5y") + 
+  theme(plot.title = element_text(hjust=0.5, size=12))
+
+# Display the plot
+plot_grid(ggmonth1a_lsd, ggmonth1a_msd, 
+          p_ccf_uncertainty_lsd, p_ccf_uncertainty_msd,
+          labels = "AUTO", label_size = 12, 
+          ncol=2, rel_heights = c(0.725, 1), align="v", axis="lr") 
+ggsave("./out/titers_gems_1a_lsd_msd.png", height = 20, width = 30, units="cm", dpi=300, bg=NULL)
+
+```
+```{r main-ccf, fig.width=7, fig.height=11, message=F, warning=F}
+
+plot_grid(BPm_together, ggmonth1a_total, p_ccf_uncertainty_total,
+          labels = "AUTO", label_size = 12, 
+          ncol=1, rel_heights = c(0.89, 0.725, 1), align="v", axis="rl")
+ggsave("./out/titers_inc_ccf.png", height = 30, width = 17.5, units="cm", dpi=300, bg=NULL)
+
+```
+
+# ANOVA
+
+```{r anova, fig.width=5, fig.height=7, warning=F, message=F}
+
+## IgA ------
+IgA_log.aov <- anova(lm(log(IgATiter) ~ factor(month, levels=c(10, 1:9, 11:12)), 
+                        data = data))
+#IgA_log.aov %>% as_flextable(show_coltype=F)
+
+fit1A = lm(log(IgATiter) ~ factor(month, levels=c(10, 1:9, 11:12)), data = data)
+# plot(fit1A, c(2,4))
+# plot(log2(data$IgATiter), cooks.distance(fit1A))
+# plot(residuals(fit1A), cooks.distance(fit1A))
+
+names(fit1A$coefficients) = c("Intercept", month.name[1:9], month.name[11:12])
+
+# fit1A %>% as_flextable(show_coltype=F)
+
+tmp_coeff = summary(fit1A)$coefficients
+tmp = tmp_coeff %>% as.data.frame() %>%
+  mutate(est = exp(Estimate),
+         lci = exp(Estimate-1.96*`Std. Error`), 
+         uci = exp(Estimate+1.96*`Std. Error`)) %>% 
+  mutate(est_ci = paste0(my_format_mod(est, 2, 3), " (", 
+                         my_format_mod(lci, 2, 3), ", ", my_format_mod(uci, 2, 3), ")")) %>% 
+  mutate(pstar = ifelse(`Pr(>|t|)`<0.001, "***", 
+                        ifelse(`Pr(>|t|)`<0.01, "**", 
+                               ifelse(`Pr(>|t|)`<0.05, "*", ""))))
+
+fit1Apretty = data.frame(Month = c("Intercept", month.name[1:12]), 
+                         Est_A = c(tmp$est_ci[1:10], "Ref", tmp$est_ci[11:12]),
+                         P_A = c(tmp$pstar[1:10], "", tmp$pstar[11:12]))
+
+tmp_1A_sum = summary(fit1A)
+tmp_1A_sum_F = tmp_1A_sum$fstatistic["value"]
+tmp_1A_sum_numdf = tmp_1A_sum$fstatistic["numdf"]
+tmp_1A_sum_dendf = tmp_1A_sum$fstatistic["dendf"]
+
+tmp_ft_A = data.frame(Month = c("N. obs", "SE Residuals", "R2; Adj-R2", "F-stat", "P-value"), 
+                      Est_A = c(length(fit1A$fitted.values), 
+                                my_format(sd(fit1A$residuals), 2),
+                                paste0(my_format(summary(fit1A)$r.squared, 2), "; ", my_format(summary(fit1A)$adj.r.squared, 2)),
+                                my_format(tmp_1A_sum_F, 2),
+                                my_smallvalue(pf(tmp_1A_sum_F, tmp_1A_sum_numdf, tmp_1A_sum_dendf, lower.tail = F), 3)))
+
+
+# tmp_ft_A = fit1A %>% as_flextable() %>%
+#   delete_part(part="body") %>% 
+#   delete_part(part="header") 
+
+tmp_pretty_A = fit1Apretty %>% as_flextable(max_row = 13, show_coltype=F) %>% 
+  delete_rows(i = 1, part = "footer") %>%
+  bg(bg = "black", part = "header") %>% 
+  color(color = "white", part = "header")
+
+# vtmp_pretty_A$footer = tmp_ft_A$footer
+
+# If you wanted to predict the means, here it is: 
+fit1Apred = predict(fit1A, newdata=data.frame(month = factor(1:12)), interval="confidence")
+# 2^(fit1Apred) %>% as_tibble %>% as_flextable(max_rows=12)
+  
+## IgG ------
+IgG_log.aov = anova(lm(log(IgGTiter) ~ factor(month, levels=c(10, 1:9, 11:12)), data = data))
+# lm(log2(IgGTiter) ~ factor(month, levels=c(10, 1:9, 11:12)), data = data) %>% summary
+fit1G = lm(log(IgGTiter) ~ factor(month, levels=c(10, 1:9, 11:12)), data = data) # %>% summary
+
+anova_IgG_resid_kurtosis = moments::kurtosis(fit1G$residuals)
+anova_IgG_resid_skewness = moments::skewness(fit1G$residuals)
+anova_IgG_resid_jarque_bera = moments::jarque.test(fit1G$residuals)
+
+names(fit1G$coefficients) = c("Intercept", month.name[1:9], month.name[11:12])
+
+tmp_coeff = summary(fit1G)$coefficients
+tmp = tmp_coeff %>% as.data.frame() %>%
+  mutate(est = exp(Estimate),
+         lci = exp(Estimate-1.96*`Std. Error`), 
+         uci = exp(Estimate+1.96*`Std. Error`)) %>% 
+  mutate(est_ci = paste0(my_format_mod(est, 2, 3), " (", 
+                my_format_mod(lci, 2, 3), ", ", my_format_mod(uci, 2, 3), ")")) %>% 
+  mutate(pstar = ifelse(`Pr(>|t|)`<0.001, "***", 
+                ifelse(`Pr(>|t|)`<0.01, "**", 
+                ifelse(`Pr(>|t|)`<0.05, "*", ""))))
+
+fit1Gpretty = data.frame(Month = c("Intercept", month.name[1:12]), 
+          Est_G = c(tmp$est_ci[1:10], "Ref", tmp$est_ci[11:12]),
+          P_G = c(tmp$pstar[1:10], "", tmp$pstar[11:12]))
+
+tmp_1G_sum = summary(fit1G)
+tmp_1G_sum_F = tmp_1G_sum$fstatistic["value"]
+# tmp_1G_sum_numdf = tmp_1G_sum$fstatistic["numdf"]
+# tmp_1G_sum_dendf = tmp_1G_sum$fstatistic["dendf"]
+
+tmp_ft_G = data.frame(Month = c("N. obs", "SE Residuals", "R2; Adj-R2", "F-stat", "P-value"), 
+                      Est_G = c(length(fit1G$fitted.values), 
+                                my_format(sd(fit1G$residuals), 2),
+                                paste0(my_smallvalue(summary(fit1G)$r.squared, 2), "; ", my_smallvalue(summary(fit1G)$adj.r.squared, 2)),
+                                my_format(tmp_1G_sum_F, 2),
+                                my_smallvalue(fpvalue(fit1G)$Fp, 3)))
+# pf(tmp_1G_sum_F, tmp_1G_sum_numdf, tmp_1G_sum_dendf, lower.tail = F)
+
+fit1Apretty %>% 
+  bind_rows(tibble(tmp_ft_A)) %>%
+  full_join(fit1Gpretty %>% bind_rows(tmp_ft_G)) %>%
+  as_flextable(max_row = 30, show_coltype=F, spread_first_col = TRUE) %>% 
+  delete_part(part = "footer") %>%
+  bg(bg = "black", part = "header") %>% 
+  color(color = "white", part = "header") %>% 
+  bg(i=14:18, bg = "gray80", part = "body") %>% 
+  hline(i=13, border=officer::fp_border(style = "solid", width = 2), part="body") %>% 
+  add_header_row(values = c("", "IgA", "IgG"), colwidths = c(1, 2, 2), top = TRUE) %>% 
+  set_header_labels(values = c("Month", "Estimate", "P-value", "Estimate", "P-value")) %>%
+  hline(i=1, border=officer::fp_border(style = "solid", width = 2), part="header") %>% 
+  align(align = "center", part = "header") %>% 
+  line_spacing(space = 1, part = "all") %>% 
+  add_footer_lines("Signif. codes: 0 ≤ '***' < 0.001 < '**' < 0.01 < '*' < 0.05") %>% 
+  italic(part="footer", italic=T) # %>% 
+
+```
+
+\newpage
+# Seasonal models
+
+## Seasonal regression (parametric)
+```{r seasonalols-calculations, warning=F, message=F}
+# Fitting sine wave with log2 -------------------
+## IgA
+lm_IgA_sine   = lm(log(IgATiter)~1+cos(2*pi*dayofyear/366)+sin(2*pi*dayofyear/366), data)
+lm_IgA_sine_m = lm(log(IgATiter)~1+cos(2*pi*month/12)+sin(2*pi*month/12), data)
+
+## IgG 
+lm_IgG_sine   = lm(log(IgGTiter)~1+cos(2*pi*dayofyear/366)+sin(2*pi*dayofyear/366), data)
+lm_IgG_sine_m = lm(log(IgGTiter)~1+cos(2*pi*month/12)+sin(2*pi*month/12), data)
+
+# Other useful quick code.
+# plot(lm_log2_IgA_sine, which=2)
+
+# lm_log2_IgG_sine %>% as_flextable %>%
+#   bg(bg = "black", part = "header") %>% 
+#   color(color = "white", part = "header") %>%
+#   bg(bg = "gray80", part = "footer")
+
+## Predictions -----
+
+newpred_day   = data.frame(dayofyear=seq(1, 366))
+newpred_month = data.frame(month=seq(1, 12))
+
+sine_day_design = matrix(c(rep(1,length(newpred_day$dayofyear)), # intercept
+                         cos(2*pi*newpred_day$dayofyear/366), # days of the year, cosine-d
+                         sin(2*pi*newpred_day$dayofyear/366)), # days of the year, sine-d
+                         ncol=3, byrow=F) # put this into 3 columns, fill the columns before you fill the rows
+
+sine_month_design = matrix(c(rep(1,length(newpred_month$month)), # intercept
+                         cos(2*pi*newpred_month$month/12), # days of the year, cosine-d
+                         sin(2*pi*newpred_month$month/12)), # days of the year, sine-d
+                         ncol=3, byrow=F) # put this into 3 columns, fill the columns before you fill the rows
+
+# iterates of the coefficients
+tmp_sim_IgA   = mvrnorm(1000, coef(lm_IgA_sine),   Sigma=vcov(lm_IgA_sine))
+tmp_sim_IgA_m = mvrnorm(1000, coef(lm_IgA_sine_m), Sigma=vcov(lm_IgA_sine_m))
+tmp_sim_IgG   = mvrnorm(1000, coef(lm_IgG_sine),   Sigma=vcov(lm_IgG_sine))
+tmp_sim_IgG_m = mvrnorm(1000, coef(lm_IgG_sine_m), Sigma=vcov(lm_IgG_sine_m))
+
+IgA_sine_pred_iter   = exp(sine_day_design %*% t(tmp_sim_IgA)) # t() bc the inner dimensions have to match (remember matrix multiplication)
+IgA_sine_pred_iter_m = exp(sine_month_design %*% t(tmp_sim_IgA_m)) 
+IgG_sine_pred_iter   = exp(sine_day_design %*% t(tmp_sim_IgG)) 
+IgG_sine_pred_iter_m = exp(sine_month_design %*% t(tmp_sim_IgG_m)) 
+# code for quick checks
+# matplot(t(IgA_sine_pred_iter %>% apply(2, quantile, c(0.5, 0.025, 0.975))), type="l")
+
+# Peaks and troughs - timing
+IgA_sine_summ_d_min_ci  = IgA_sine_pred_iter %>% apply(2, which.min) %>% mean_ci %>% 
+                              +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+# IgA_sine_summ_d_min_iqr = IgA_sine_pred_iter %>% apply(2, which.min) %>% med_iqr %>% 
+#                               +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+IgA_sine_summ_d_max_ci  = IgA_sine_pred_iter %>% apply(2, which.max) %>% mean_ci %>% 
+                              +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+# IgA_sine_summ_d_max_iqr = IgA_sine_pred_iter %>% apply(2, which.max) %>% med_iqr %>% 
+#                               +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+
+IgA_sine_summ_m_min_ci  = IgA_sine_pred_iter_m %>% apply(2, which.min) %>% mean_ci %>% month.abb[.] %>% time_range_concat
+# IgA_sine_summ_m_min_iqr = IgA_sine_pred_iter_m %>% apply(2, which.min) %>% med_iqr %>% month.abb[.] %>% time_range_concat
+IgA_sine_summ_m_max_ci  = IgA_sine_pred_iter_m %>% apply(2, which.max) %>% mean_ci %>% month.abb[.] %>% time_range_concat
+# IgA_sine_summ_m_max_iqr = IgA_sine_pred_iter_m %>% apply(2, which.max) %>% med_iqr %>% month.abb[.] %>% time_range_concat
+
+IgG_sine_summ_d_min_ci  = IgG_sine_pred_iter %>% apply(2, which.min) %>% mean_ci %>% 
+                              +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+# IgG_sine_summ_d_min_iqr = IgG_sine_pred_iter %>% apply(2, which.min) %>% med_iqr %>% 
+#                               +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+IgG_sine_summ_d_max_ci  = IgG_sine_pred_iter %>% apply(2, which.max) %>% mean_ci %>% 
+                              +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+# IgG_sine_summ_d_max_iqr = IgG_sine_pred_iter %>% apply(2, which.max) %>% med_iqr %>% 
+#                               +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+
+IgG_sine_summ_m_min_ci  = IgG_sine_pred_iter_m %>% apply(2, which.min) %>% mean_ci %>% month.abb[.] %>% time_range_concat
+# IgG_sine_summ_m_min_iqr = IgG_sine_pred_iter_m %>% apply(2, which.min) %>% med_iqr %>% month.abb[.] %>% time_range_concat
+IgG_sine_summ_m_max_ci  = IgG_sine_pred_iter_m %>% apply(2, which.max) %>% mean_ci %>% month.abb[.] %>% time_range_concat
+# IgG_sine_summ_m_max_iqr = IgG_sine_pred_iter_m %>% apply(2, which.max) %>% med_iqr %>% month.abb[.] %>% time_range_concat
+
+# Peaks and troughs - antibody levels
+IgAab_sine_summ_d_min_ci = IgA_sine_pred_iter %>% apply(2, min) %>% mean_ci %>% ci_string_dec(0)
+IgAab_sine_summ_d_max_ci = IgA_sine_pred_iter %>% apply(2, max) %>% mean_ci %>% ci_string_dec(0)
+IgAab_sine_summ_m_min_ci = IgA_sine_pred_iter_m %>% apply(2, min) %>% mean_ci %>% ci_string_dec(0)
+IgAab_sine_summ_m_max_ci = IgA_sine_pred_iter_m %>% apply(2, max) %>% mean_ci %>% ci_string_dec(0)
+
+IgGab_sine_summ_d_min_ci = IgG_sine_pred_iter %>% apply(2, min) %>% mean_ci %>% ci_string_dec(0)
+IgGab_sine_summ_d_max_ci = IgG_sine_pred_iter %>% apply(2, max) %>% mean_ci %>% ci_string_dec(0)
+IgGab_sine_summ_m_min_ci = IgG_sine_pred_iter_m %>% apply(2, min) %>% mean_ci %>% ci_string_dec(0)
+IgGab_sine_summ_m_max_ci = IgG_sine_pred_iter_m %>% apply(2, max) %>% mean_ci %>% ci_string_dec(0)
+
+# amplitude - absolute
+IgAab_sine_summ_d_amp_ci = IgA_sine_pred_iter %>% apply(2, range) %>% apply(2, diff) %>% mean_ci %>% ci_string_dec(0)
+IgAab_sine_summ_m_amp_ci = IgA_sine_pred_iter_m %>% apply(2, range) %>% apply(2, diff) %>% mean_ci %>% ci_string_dec(0)
+IgGab_sine_summ_d_amp_ci = IgG_sine_pred_iter %>% apply(2, range) %>% apply(2, diff) %>% mean_ci %>% ci_string_dec(0)
+IgGab_sine_summ_m_amp_ci = IgG_sine_pred_iter_m %>% apply(2, range) %>% apply(2, diff) %>% mean_ci %>% ci_string_dec(0)
+
+# amplitude - ratio
+myratio = function(x){x[2]/x[1]}
+IgAab_sine_summ_d_rat_ci = IgA_sine_pred_iter %>% apply(2, range) %>% apply(2, myratio) %>% mean_ci %>% ci_string_dec(2)
+IgAab_sine_summ_m_rat_ci = IgA_sine_pred_iter_m %>% apply(2, range) %>% apply(2, myratio) %>% mean_ci %>% ci_string_dec(2)
+IgGab_sine_summ_d_rat_ci = IgG_sine_pred_iter %>% apply(2, range) %>% apply(2, myratio) %>% mean_ci %>% ci_string_dec(2)
+IgGab_sine_summ_m_rat_ci = IgG_sine_pred_iter_m %>% apply(2, range) %>% apply(2, myratio) %>% mean_ci %>% ci_string_dec(2)
+
+sine_models = list("IgA, DOB" = lm_IgA_sine, "IgA, MOB" = lm_IgA_sine_m, "IgG, DOB" = lm_IgG_sine, "IgG, MOB" = lm_IgG_sine_m)
+
+fstats = sapply(1:length(sine_models), function(i){fpvalue(sine_models[[i]])}) %>% unlist 
+fstats = data.frame(part="gof", term="P-value", 
+                    model_name = names(sine_models), 
+                    Fp = fstats) %>% 
+  pivot_wider(names_from = model_name, values_from = Fp) %>% 
+  mutate(across(names(sine_models), ~ my_smallvalue(.x, 3)))
+
+# peaks and troughs - time
+lm_peak_ci = tibble("IgA, DOB" = IgA_sine_summ_d_max_ci, "IgA, MOB" = IgA_sine_summ_m_max_ci, 
+               "IgG, DOB" = IgG_sine_summ_d_max_ci, "IgG, MOB" = IgG_sine_summ_m_max_ci) %>% 
+                  mutate(term = "Peak time")
+lm_trough_ci = tibble("IgA, DOB" = IgA_sine_summ_d_min_ci, "IgA, MOB" = IgA_sine_summ_m_min_ci, 
+                 "IgG, DOB" = IgG_sine_summ_d_min_ci, "IgG, MOB" = IgG_sine_summ_m_min_ci) %>% 
+                  mutate(term = "Trough time")
+
+# peaks and troughs - amplitude and ratio
+lm_amp = tibble("IgA, DOB" = IgAab_sine_summ_d_amp_ci, "IgA, MOB" = IgAab_sine_summ_m_amp_ci, 
+                "IgG, DOB" = IgGab_sine_summ_d_amp_ci, "IgG, MOB" = IgGab_sine_summ_m_amp_ci) %>% 
+                    mutate(term = "Amplitude") %>% relocate(term)
+lm_rat = tibble("IgA, DOB" = IgAab_sine_summ_d_rat_ci, "IgA, MOB" = IgAab_sine_summ_m_rat_ci, 
+                "IgG, DOB" = IgGab_sine_summ_d_rat_ci, "IgG, MOB" = IgGab_sine_summ_m_rat_ci) %>% 
+                    mutate(term = "Peak:Trough ratio") %>% relocate(term)
+
+# peaks and troughs - antibodies
+lm_peak_ab_ci = tibble("IgA, DOB" = IgAab_sine_summ_d_max_ci, "IgA, MOB" = IgAab_sine_summ_m_max_ci, 
+                    "IgG, DOB" = IgGab_sine_summ_d_max_ci, "IgG, MOB" = IgGab_sine_summ_m_max_ci) %>% 
+                    mutate(term = "Peak antibodies") %>% relocate(term)
+lm_trough_ab_ci = tibble("IgA, DOB" = IgAab_sine_summ_d_min_ci, "IgA, MOB" = IgAab_sine_summ_m_min_ci, 
+                    "IgG, DOB" = IgGab_sine_summ_d_min_ci, "IgG, MOB" = IgGab_sine_summ_m_min_ci) %>% 
+                    mutate(term = "Trough antibodies") %>% relocate(term)
+
+ms = modelsummary(sine_models,
+             fmt=NULL,
+             estimate  = "{my_format_mod(exp(estimate),2,10)} ({my_format_mod(exp(conf.low),2,10)}, {my_format_mod(exp(conf.high),2,10)}){stars}",
+             coef_rename = c("(Intercept)" = "Intercept",
+                             "cos(2 * pi * dayofyear/366)" = "Cosine", 
+                             "sin(2 * pi * dayofyear/366)" = "Sine",
+                             "cos(2 * pi * month/12)" = "Cosine", 
+                             "sin(2 * pi * month/12)" = "Sine"),
+             gof_map = c("nobs", "r.squared", "adj.r.squared", "F"),
+             statistic = NULL,
+             output="data.frame") 
+
+combined_summary = bind_rows(ms, fstats) # lm_amp, lm_rat, lm_peak_ci, lm_trough_ci,
+# combined_summary = combined_summary[c(1:3, 4:7, 12),] # c(1:3, 8:11, 4:7, 12)
+
+```
+
+## Splines (non-parametric)
+```{r seasonalsplines-calculations, warning=F, message=F}
+## GAMs ----------------------------------------------------
+
+### GAMs by day 
+IgA_spline_k = fit_gam_model_kout(data, "IgATiter", "dayofyear") %>% which.min() # the k for the model below. 
+IgA_spline = gam(log(IgATiter)~s(dayofyear, bs='cc', k=IgA_spline_k), family=gaussian, data = data)
+# plot(IgA_spline, scale = 0)
+
+IgG_spline_k = fit_gam_model_kout(data, "IgGTiter", "dayofyear") %>% which.min() # the k for the model below.
+# The difference is minimal, so we will take the minimum k
+
+IgG_spline = gam(log(IgGTiter)~s(dayofyear, bs="cc", k=3), family=gaussian, data = data)
+# plot(IgG_spline, scale = 0)
+
+### GAMs by month (robustness check) 
+IgA_spline_m_k = fit_gam_model_kout(data, "IgATiter", "month") %>% which.min() # the k for the model below.
+IgA_spline_m = gam(log(IgATiter)~s(month,bs="cc", k=IgA_spline_m_k), family=gaussian, data = data)
+# plot(IgA_spline_m, scale = 0)
+
+IgG_spline_m_k = fit_gam_model_kout(data, "IgGTiter", "month") %>% which.min() # the k for the model below. 
+# The difference is minimal, so we will take the minimum k
+
+IgG_spline_m = gam(log(IgGTiter)~s(month,bs="cc", k=IgG_spline_m_k), family=gaussian, data = data)
+# plot(IgG_spline_m, scale = 0)
+
+# Some basic code to check gam models
+# coef(IgA_spline)
+# gam.check(IgA_spline) # this shows that log is necessary. When I did the linear one, the Q-Q plot was a mess.
+# summary(IgA_spline)
+# plot(IgA_spline, scale = 0)
+# anova(IgA_spline)
+
+# Flextable to summarize one model alone (almost an ANOVA table for GAMs)
+# as_flextable(IgA_spline) %>%
+#   bg(bg = "black", part = "header") %>% 
+#   color(color = "white", part = "header") %>%
+#   bg(i=2, bg = "black", part = "body") %>% 
+#   color(i=2, color = "white", part = "body") %>%
+#   bg(bg = "gray80", part = "footer")
+
+### Predictions and summaries
+newpred_day = data.frame(dayofyear=seq(1, 366))
+newpred_month = data.frame(month=seq(1, 12))
+
+# Getting iterates out of the models -----
+IgA_spline_pred   = gam_predictions(IgA_spline, newpred_day, 50000) %>% exp()
+IgA_spline_m_pred = gam_predictions(IgA_spline_m, newpred_month, 50000) %>% exp()
+IgG_spline_pred   = gam_predictions(IgG_spline, newpred_day, 50000) %>% exp()
+IgG_spline_m_pred = gam_predictions(IgG_spline_m, newpred_month, 50000) %>% exp()
+
+# IgG_spline_resp = predict.gam(IgG_spline, newdata=newpred_day, type="response", se.fit=T) 
+
+# Summarizing the peaks and the troughs of each model with 95% CIs and Median [IQR]
+# IgA_spline_summ_d_min_iqr = IgA_spline_pred %>% apply(2, which.min) %>% med_iqr %>% 
+#                               +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+IgA_spline_summ_d_min_ci = IgA_spline_pred %>% apply(2, which.min) %>% mean_ci %>% 
+                              +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+# IgA_spline_summ_d_max_iqr = IgA_spline_pred %>% apply(2, which.max) %>% med_iqr %>% 
+#                               +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+IgA_spline_summ_d_max_ci = IgA_spline_pred %>% apply(2, which.max) %>% mean_ci %>% 
+                              +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+
+# IgA_spline_summ_m_min_iqr = IgA_spline_m_pred %>% apply(2, which.min) %>% med_iqr %>% month.abb[.] %>% time_range_concat
+IgA_spline_summ_m_min_ci = IgA_spline_m_pred %>% apply(2, which.min) %>% mean_ci %>% month.abb[.] %>% time_range_concat
+# IgA_spline_summ_m_max_iqr = IgA_spline_m_pred %>% apply(2, which.max) %>% med_iqr %>% month.abb[.] %>% time_range_concat
+IgA_spline_summ_m_max_ci = IgA_spline_m_pred %>% apply(2, which.max) %>% mean_ci %>% month.abb[.] %>% time_range_concat
+
+# IgG_spline_summ_d_min_iqr = IgG_spline_pred %>% apply(2, which.min) %>% med_iqr  %>% 
+                              #+as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+IgG_spline_summ_d_min_ci = IgG_spline_pred %>% apply(2, which.min) %>% mean_ci %>% 
+                              +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+# IgG_spline_summ_d_max_iqr = IgG_spline_pred %>% apply(2, which.max) %>% med_iqr %>% 
+                              #+as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+IgG_spline_summ_d_max_ci = IgG_spline_pred %>% apply(2, which.max) %>% mean_ci %>% 
+                              +as.Date("2012-01-01") %>% format("%b %d") %>% time_range_concat
+
+# IgG_spline_summ_m_min_iqr = IgG_spline_m_pred %>% apply(2, which.min) %>% med_iqr %>% month.abb[.] %>% time_range_concat
+IgG_spline_summ_m_min_ci = IgG_spline_m_pred %>% apply(2, which.min) %>% mean_ci %>% month.abb[.] %>% time_range_concat
+# IgG_spline_summ_m_max_iqr = IgG_spline_m_pred %>% apply(2, which.max) %>% med_iqr %>% month.abb[.] %>% time_range_concat
+IgG_spline_summ_m_max_ci = IgG_spline_m_pred %>% apply(2, which.max) %>% mean_ci %>% month.abb[.] %>% time_range_concat
+
+# antibody levels at peak and trough
+IgAab_spline_summ_d_min_ci = IgA_spline_pred %>% apply(2, min) %>% mean_ci %>% ci_string_dec(0)
+IgAab_spline_summ_d_max_ci = IgA_spline_pred %>% apply(2, max) %>% mean_ci %>% ci_string_dec(0)
+IgAab_spline_summ_m_min_ci = IgA_spline_m_pred %>% apply(2, min) %>% mean_ci %>% ci_string_dec(0)
+IgAab_spline_summ_m_max_ci = IgA_spline_m_pred %>% apply(2, max) %>% mean_ci %>% ci_string_dec(0)
+
+IgGab_spline_summ_d_min_ci = IgG_spline_pred %>% apply(2, min) %>% mean_ci %>% ci_string_dec(0)
+IgGab_spline_summ_d_max_ci = IgG_spline_pred %>% apply(2, max) %>% mean_ci %>% ci_string_dec(0)
+IgGab_spline_summ_m_min_ci = IgG_spline_m_pred %>% apply(2, min) %>% mean_ci %>% ci_string_dec(0)
+IgGab_spline_summ_m_max_ci = IgG_spline_m_pred %>% apply(2, max) %>% mean_ci %>% ci_string_dec(0)
+
+# amplitude - absolute
+IgAab_spline_summ_d_amp_ci = IgA_spline_pred %>% apply(2, range) %>% apply(2, diff) %>% mean_ci %>% ci_string_dec(0)
+IgAab_spline_summ_m_amp_ci = IgA_spline_m_pred %>% apply(2, range) %>% apply(2, diff) %>% mean_ci %>% ci_string_dec(0)
+IgGab_spline_summ_d_amp_ci = IgG_spline_pred %>% apply(2, range) %>% apply(2, diff) %>% mean_ci %>% ci_string_dec(0)
+IgGab_spline_summ_m_amp_ci = IgG_spline_m_pred %>% apply(2, range) %>% apply(2, diff) %>% mean_ci %>% ci_string_dec(0)
+
+# amplitude - ratio
+myratio = function(x){x[2]/x[1]}
+IgAab_spline_summ_d_rat_ci = IgA_spline_pred %>% apply(2, range) %>% apply(2, myratio) %>% mean_ci %>% ci_string_dec(2)
+IgAab_spline_summ_m_rat_ci = IgA_spline_m_pred %>% apply(2, range) %>% apply(2, myratio) %>% mean_ci %>% ci_string_dec(2)
+IgGab_spline_summ_d_rat_ci = IgG_spline_pred %>% apply(2, range) %>% apply(2, myratio) %>% mean_ci %>% ci_string_dec(2)
+IgGab_spline_summ_m_rat_ci = IgG_spline_m_pred %>% apply(2, range) %>% apply(2, myratio) %>% mean_ci %>% ci_string_dec(2)
+
+# Summaries -----
+## antibodies
+gam_peak_ab_ci = tibble("IgA, DOB" = IgAab_spline_summ_d_max_ci, "IgA, MOB" = IgAab_spline_summ_m_max_ci, 
+                    "IgG, DOB" = IgGab_spline_summ_d_max_ci, "IgG, MOB" = IgGab_spline_summ_m_max_ci) %>% 
+                    mutate(term = "Peak antibodies") %>% relocate(term)
+gam_trough_ab_ci = tibble("IgA, DOB" = IgAab_spline_summ_d_min_ci, "IgA, MOB" = IgAab_spline_summ_m_min_ci, 
+                    "IgG, DOB" = IgGab_spline_summ_d_min_ci, "IgG, MOB" = IgGab_spline_summ_m_min_ci) %>% 
+                    mutate(term = "Trough antibodies") %>% relocate(term)
+## time
+gam_peak_ci = tibble("IgA, DOB" = IgA_spline_summ_d_max_ci, "IgA, MOB" = IgA_spline_summ_m_max_ci, 
+                "IgG, DOB" = IgG_spline_summ_d_max_ci, "IgG, MOB" = IgG_spline_summ_m_max_ci) %>% 
+                    mutate(term = "Peak time") %>% relocate(term)
+gam_trough_ci = tibble("IgA, DOB" = IgA_spline_summ_d_min_ci, "IgA, MOB" = IgA_spline_summ_m_min_ci, 
+                  "IgG, DOB" = IgG_spline_summ_d_min_ci, "IgG, MOB" = IgG_spline_summ_m_min_ci) %>% 
+                    mutate(term = "Trough time") %>% relocate(term)
+## amplitude and ratio
+gam_amp = tibble("IgA, DOB" = IgAab_spline_summ_d_amp_ci, "IgA, MOB" = IgAab_spline_summ_m_amp_ci, 
+            "IgG, DOB" = IgGab_spline_summ_d_amp_ci, "IgG, MOB" = IgGab_spline_summ_m_amp_ci) %>% 
+                    mutate(term = "Amplitude") %>% relocate(term)
+gam_rat = tibble("IgA, DOB" = IgAab_spline_summ_d_rat_ci, "IgA, MOB" = IgAab_spline_summ_m_rat_ci, 
+            "IgG, DOB" = IgGab_spline_summ_d_rat_ci, "IgG, MOB" = IgGab_spline_summ_m_rat_ci) %>% 
+                    mutate(term = "Peak:Trough ratio") %>% relocate(term)
+
+## Pulling GAM models together -----------------------
+gam_model_intercepts = c("IgA, DOB" = (extract_Int_CI(IgA_spline)   %>% exp() %>% ci_string_dec(0)), 
+                         "IgA, MOB" = (extract_Int_CI(IgA_spline_m) %>% exp() %>% ci_string_dec(0)),
+                         "IgG, DOB" = (extract_Int_CI(IgG_spline)   %>% exp() %>% ci_string_dec(0)),
+                         "IgG, MOB" = (extract_Int_CI(IgG_spline_m) %>% exp() %>% ci_string_dec(0))) %>% 
+                           tibble::enframe(name = "model", value = "Intercept") 
+
+gam_k = c("IgA, DOB" = IgA_spline_k, "IgA, MOB" = IgA_spline_m_k, 
+          "IgG, DOB" = IgG_spline_k, "IgG, MOB" = IgG_spline_m_k) %>% 
+             tibble::enframe(name = "model", value = "k") 
+
+all_tidy_gams = bind_rows( # modelsummary doesn't play nice with gam objects, hence tidy()
+  mutate(tidy(IgA_spline,   type = "smooth"), model = "IgA, DOB"),
+  mutate(tidy(IgA_spline_m, type = "smooth"), model = "IgA, MOB"),
+  mutate(tidy(IgG_spline,   type = "smooth"), model = "IgG, DOB"),
+  mutate(tidy(IgG_spline_m, type = "smooth"), model = "IgG, MOB")) %>% 
+  full_join(gam_model_intercepts) %>% 
+  # full_join(gam_amp) %>% 
+  # full_join(gam_rat) %>% 
+  # full_join(gam_peak_ci) %>% 
+  # full_join(gam_trough_ci) %>% 
+  full_join(gam_k) %>% 
+  relocate(model, term, Intercept, edf, k) %>% # Amplitude, PeakTroughRatio, peak_CI, trough_CI,
+  mutate(across(c("edf", "statistic"), ~ my_format(.x, 2))) %>% 
+  mutate(p.value = my_smallvalue(p.value, 3))
+  
+all_tidy_gams_df = all_tidy_gams %>% t() %>% as.data.frame()
+colnames(all_tidy_gams_df) = all_tidy_gams_df[1,]
+all_tidy_gams_df = all_tidy_gams_df[-c(1:2),]
+all_tidy_gams_df$prop = c("Intercept", 
+                          #"Amplitude", "Peak:Through Ratio",
+                          #"Peak time", "Trough time", 
+                          "EDF", "Basis dimension (k)", "Ref DF", "F", "P-value")
+
+```
+
+<!-- ## Putting both types of models together -->
+```{r allmodelstable, warning=F, message=F, fig.height=5, fig.width=5}
+
+# sine wave
+all_tidy_sine_df_main = combined_summary %>% 
+  dplyr::select(-part, -statistic) %>% 
+  bind_rows(lm_peak_ab_ci) %>%
+  bind_rows(lm_trough_ab_ci) %>%
+  bind_rows(lm_amp) %>%
+  bind_rows(lm_rat) %>%
+  bind_rows(lm_peak_ci) %>%
+  bind_rows(lm_trough_ci) %>%
+  filter(term %in% c("Peak time", "Trough time", "Peak:Trough ratio", # "Amplitude", 
+                     "Intercept", "Peak antibodies", "Trough antibodies",
+                      "P-value")) %>%
+  arrange(match(term, c("Peak time", "Trough time", "Peak:Trough ratio", # "Amplitude", 
+                        "Intercept", "Peak antibodies", "Trough antibodies", 
+                        "P-value"))) %>% 
+  mutate(Models = "Par") %>% 
+  mutate(across(where(is.character), ~ str_replace_all(., "\\*", ""))) %>%
+  relocate(Models) %>% 
+  mutate(term = c("Peak time", "Trough time", "Peak:Trough ratio", # "Amplitude", 
+                  "Average antibodies", "Peak antibodies", "Trough antibodies", 
+                  "P-value"))
+
+# gams
+all_tidy_gams_df_main = all_tidy_gams %>% 
+  dplyr::select(model, Intercept, p.value) %>% 
+  t() %>% as.data.frame()
+colnames(all_tidy_gams_df_main) = all_tidy_gams_df_main[1,]
+all_tidy_gams_df_main = all_tidy_gams_df_main[-1,]
+all_tidy_gams_df_main$term = c("Average antibodies", "P-value")
+
+all_tidy_gams_df_main = gam_peak_ci %>%
+  bind_rows(gam_trough_ci) %>%
+  bind_rows(gam_rat) %>%
+  bind_rows(all_tidy_gams_df_main) %>%
+  bind_rows(gam_peak_ab_ci) %>%
+  bind_rows(gam_trough_ab_ci) %>%
+  # bind_rows(gam_amp) %>%
+  mutate(Models = "NonPar") %>% 
+  relocate(Models, term) %>% 
+  arrange(match(term, c("Peak time", "Trough time", "Peak:Trough ratio",
+                        "Average antibodies", "Peak antibodies", "Trough antibodies", 
+                        "P-value"))) 
+
+# Combined # add amplitude and the ratios here... Consider if to remoce the others?
+bind_rows(all_tidy_sine_df_main, all_tidy_gams_df_main) %>% 
+  rename("IgA_DOB" = "IgA, DOB", "IgG_DOB" = "IgG, DOB", "IgA_MOB" = "IgA, MOB", "IgG_MOB" = "IgG, MOB") %>% 
+  pivot_longer(cols=IgA_DOB:IgG_MOB) %>% 
+  separate(name, into = c("Antibody", "Timing"), sep = "_") %>% 
+  pivot_wider(names_from = c(Models, Timing), names_sep = "_", values_from = value) %>% 
+  arrange(Antibody) %>% 
+  as_grouped_data(groups="Antibody") %>% 
+  # mutate(Models = factor(Models)) %>% 
+  # as_grouped_data(groups = "Models") %>% 
+  as_flextable() %>%
+  delete_rows(i = 1, part = "footer") %>%
+  bg(bg = "black", part = "header") %>%
+  color(color = "white", part = "header") %>%
+  bg(i=c(8, 16), bg = "gray80", part = "body") %>% 
+  bold(i=c(8, 16), bold=T, part="body") %>%
+  italic(i=c(8, 16), italic=T, part="body") %>%
+  bg(i=c(1, 9), bg = "gray30", part = "body") %>% 
+  color(i=c(1, 9), color = "white", part = "body") %>%
+  italic(i = c(1, 9), part = "body") %>% 
+  compose(i = 1, j = 1, value = as_paragraph("IgA")) %>%
+  compose(i = 9, j = 1, value = as_paragraph("IgG")) %>%
+  hline(i=c(4,12), border=officer::fp_border(style = "solid", color = "gray30", width = 1.5), part="body") %>% 
+  hline(i=c(1,8,9), border=officer::fp_border(style = "solid", color = "gray30", width = 1.5), part="body") %>% 
+  add_header_row(values = c("", "Parametric model", "Non-parametric model"), colwidths = c(1, 2, 2), top = TRUE) %>% 
+  set_header_labels(values = c("", "Days", "Months", "Days", "Months")) %>%
+  align(align = "center", part = "header") %>% 
+  hline(i=1:2, border=officer::fp_border(style = "solid", width = 1.5), part="header") %>% 
+  # line_spacing(space = 1, part = "all") %>% 
+  fontsize(size = 11, part = "all") %>% 
+  set_table_properties(layout='autofit', width=1,
+                       word_description="Seasonal models. The intercept indicates the average antibody levels throughout the year, not the peaks or the troughs. Peak and trough values are means (95% CI). P-values come from the F-test on whether the seasonal curves fit the data significantly better than a null model with no seasonal patterns. P-values<0.05 indicate significance.")
+
+dates_15th = seq.Date(from = as.Date("2012-01-15"), to = as.Date("2012-12-15"), by = "month")
+month_midpoints = as.numeric(dates_15th - as.Date("2012-01-01") + 1)
+
+all_datsum_list = list()
+all_mods_list = list()
+
+all_datsum_list[[1]] = IgA_data_month = data %>% group_by(month) %>% 
+  summarize(mean = GMT(IgATiter), lci = GMT_CI_se_low(IgATiter), uci=GMT_CI_se_high(IgATiter)) %>% 
+  mutate(month=month.abb[month], Ig = "IgA")
+all_datsum_list[[2]] = IgG_data_month = data %>% group_by(month) %>% 
+  summarize(mean = GMT(IgGTiter), lci = GMT_CI_se_low(IgGTiter), uci=GMT_CI_se_high(IgGTiter)) %>% 
+  mutate(month=month.abb[month], Ig = "IgG")
+  
+get_pred_month_summary = function(pred_array){
+  tmp = pred_array %>% apply(1, mean_ci) %>% as.data.frame %>% tibble
+  colnames(tmp) = month.abb
+  tmp$measure = c("mean", "lci", "uci")
+  tmp = tmp %>% pivot_longer(cols=Jan:Dec, names_to = "month") %>% 
+    pivot_wider(id_cols=month, names_from = measure, values_from = value)
+  return(tmp)
+}
+  
+all_mods_list[[1]] = IgA_sine_pred_iter[month_midpoints,] %>% get_pred_month_summary %>% 
+        mutate(Ig = "IgA", Time = "Day", Model = "Parametric model")
+all_mods_list[[2]] = IgA_sine_pred_iter_m %>% get_pred_month_summary %>% 
+        mutate(Ig = "IgA", Time = "Month", Model = "Parametric model")
+all_mods_list[[3]] = IgG_sine_pred_iter[month_midpoints,] %>% get_pred_month_summary %>% 
+        mutate(Ig = "IgG", Time = "Day", Model = "Parametric model")
+all_mods_list[[4]] = IgG_sine_pred_iter_m %>% get_pred_month_summary %>% 
+        mutate(Ig = "IgG", Time = "Month", Model = "Parametric model")
+
+all_mods_list[[5]] = IgA_spline_pred[month_midpoints,] %>% get_pred_month_summary %>% 
+        mutate(Ig = "IgA", Time = "Day", Model = "Non-parametric model")
+all_mods_list[[6]] = IgA_spline_m_pred %>% get_pred_month_summary %>% 
+        mutate(Ig = "IgA", Time = "Month", Model = "Non-parametric model")
+all_mods_list[[7]] = IgG_spline_pred[month_midpoints,] %>% get_pred_month_summary %>% 
+        mutate(Ig = "IgG", Time = "Day", Model = "Non-parametric model")
+all_mods_list[[8]] = IgG_spline_m_pred %>% get_pred_month_summary %>% 
+        mutate(Ig = "IgG", Time = "Month", Model = "Non-parametric model")
+
+all_datsum = bind_rows(all_datsum_list) %>% rename(Month = month) %>% 
+  mutate(Month = base::as.Date(paste("15", Month, "2012"), format = "%d %b %Y"))
+all_mods = bind_rows(all_mods_list) %>% rename(Month = month) %>% 
+  mutate(Month = as.Date(paste("15", Month, "2012"), format = "%d %b %Y")) %>% 
+  mutate(Models = factor(Model)) %>%
+  mutate(Models = factor(Model, levels = c("Parametric model", "Non-parametric model")))
+
+p_bothmodels = ggplot(all_mods, aes(x=Month, y=mean)) + 
+  geom_ribbon(aes(ymin = lci, ymax = uci, fill=Models), alpha = 0.5) + 
+  geom_line(aes(color=Models), show.legend = F) +
+  facet_grid(Ig~Time) + 
+  geom_point(data = all_datsum, aes(x=Month, y=mean)) + 
+  geom_errorbar(data = all_datsum, aes(ymin=lci, ymax=uci)) + 
+  theme_bw() + 
+  theme(strip.background = element_blank()) + 
+  theme(legend.position = "bottom", 
+        legend.title = element_blank()) + 
+  scale_x_date(date_labels = "%b", date_breaks = "3 month") + 
+  scale_y_log10(limits=c(200, 2000)) + 
+  ylab("Ig (U/mL, log-scale)") + xlab(NULL) +
+  labs(caption = "Points and error bars: GMT (95% CI)")
+
+p_bothmodels
+
+ggsave("./out/seasonal_models.png", height = 15, width = 20, units="cm", dpi=300, bg=NULL)
+
+```
+
+\newpage
+# Calculating impact 
+```{r ZambiatoMali, warning=F}
+
+# 1-OR^(log(peaktroughratio))*100
+
+# Parametric:
+# IgA_sine_pred_iter %>% apply(2, range)
+# IgG_sine_pred_iter %>% apply(2, range)
+
+myratio = function(x){x[2]/x[1]}
+
+peak_trough_ratio_IgA = IgA_spline_pred %>% apply(2, range) %>% apply(2, myratio)
+peak_trough_ratio_IgG = IgG_spline_pred %>% apply(2, range) %>% apply(2, myratio)
+
+logmean = log(0.8)
+logsd = (log(0.94) - log(0.68))/(2*1.96)
+
+OR_zambia_sero_unadj = rlnorm(length(peak_trough_ratio_IgA), 
+                            logmean, logsd)
+
+logmean = log(0.78)
+logsd = (log(0.92) - log(0.66))/(2*1.96)
+
+OR_zambia_sero_adj = rlnorm(length(peak_trough_ratio_IgA), 
+                            logmean, logsd)
+
+# 0.80 (0.68-0.94) unadjusted and 0.78 (0.66-0.92) after adjustment for seasonality in Zambia. They only measured IgA.
+
+# Moon et al: 
+logmean = log(0.8)
+logsd = (log(0.96) - log(0.66))/(2*1.96)
+
+OR_southafrica = rlnorm(length(peak_trough_ratio_IgA), 
+                            logmean, logsd)
+
+logmean = log(0.72)
+logsd = (log(0.94) - log(0.55))/(2*1.96)
+
+OR_malawi_sero = rlnorm(length(peak_trough_ratio_IgA), 
+                            logmean, logsd)
+# Mandolo et al 2025 (Malawi): 0.72 (0.55-0.94)
+
+print("CONTINUOUS SEASON ANALYSIS")
+sim_sero_IgA_unadj = (1-OR_zambia_sero_unadj^(log2(peak_trough_ratio_IgA)))*100
+print("IgA ratio from spline and sero-positivity, Chilengi effect")
+sim_sero_IgA_unadj %>% mean_ci %>% ci_string_dec(2)
+sim_sero_IgG_unadj = (1-OR_zambia_sero_unadj^(log2(peak_trough_ratio_IgG)))*100
+print("IgG ratio from spline and sero-positivity, Chilengi effect")
+sim_sero_IgG_unadj %>% mean_ci %>% ci_string_dec(2)
+
+sim_sero_IgA_mwi = (1-OR_southafrica^(log2(peak_trough_ratio_IgA)))*100
+print("IgA ratio from spline and sero-positivity, Moon effect")
+sim_sero_IgA_mwi %>% mean_ci %>% ci_string_dec(2)
+sim_sero_IgG_mwi = (1-OR_southafrica^(log2(peak_trough_ratio_IgG)))*100
+print("IgG ratio from spline and sero-positivity, Moon effect")
+sim_sero_IgG_mwi %>% mean_ci %>% ci_string_dec(2)
+
+sim_sero_IgA_mwi = (1-OR_malawi_sero^(log2(peak_trough_ratio_IgA)))*100
+print("IgA ratio from spline and sero-positivity, Mandolo effect")
+sim_sero_IgA_mwi %>% mean_ci %>% ci_string_dec(2)
+sim_sero_IgG_mwi = (1-OR_malawi_sero^(log2(peak_trough_ratio_IgG)))*100
+print("IgG ratio from spline and sero-positivity, Mandolo effect")
+sim_sero_IgG_mwi %>% mean_ci %>% ci_string_dec(2)
+
+print("BINARY SEASON ANALYSIS")
+print("IgA ratio from two-season analysis and sero-positivity, Chilengi effect")
+high_low_season_IgA_mean = log10(1.54)
+high_low_season_IgA_sd = (log10(2.04) - log10(1.15))/(2*1.96)
+
+high_low_season_IgA = 10^rnorm(length(peak_trough_ratio_IgA),
+                        high_low_season_IgA_mean, high_low_season_IgA_sd)
+
+sim_sero_IgA_hl_unadj = (1-OR_zambia_sero_unadj^log2(high_low_season_IgA))*100
+sim_sero_IgA_hl_unadj %>% mean_ci %>% ci_string_dec(2)
+sim_sero_IgA_hl_zaf = (1-OR_southafrica^log2(high_low_season_IgA))*100
+sim_sero_IgA_hl_zaf %>% mean_ci %>% ci_string_dec(2)
+sim_sero_IgA_hl_mwi = (1-OR_malawi_sero^log2(high_low_season_IgA))*100
+sim_sero_IgA_hl_mwi %>% mean_ci %>% ci_string_dec(2)
+
+print("IgG ratio from two-season analysis and sero-positivity")
+high_low_season_IgG_mean = log10(1.39)
+high_low_season_IgG_sd = (log10(1.85) - log10(1.04))/(2*1.96)
+
+high_low_season_IgG = 10^rnorm(length(peak_trough_ratio_IgG),
+                        high_low_season_IgG_mean, high_low_season_IgG_sd)
+
+sim_sero_IgG_hl_unadj = (1-OR_zambia_sero_unadj^log2(high_low_season_IgG))*100
+sim_sero_IgG_hl_unadj %>% mean_ci %>% ci_string_dec(2)
+sim_sero_IgG_hl_zaf = (1-OR_southafrica^log2(high_low_season_IgG))*100
+sim_sero_IgG_hl_zaf %>% mean_ci %>% ci_string_dec(2)
+sim_sero_IgG_hl_mwi = (1-OR_malawi_sero^log2(high_low_season_IgG))*100
+sim_sero_IgG_hl_mwi %>% mean_ci %>% ci_string_dec(2)
+
+```
+
+\newpage 
+# Appendix 
+
+## Omitting IgA <7.5
+
+```{r omitlowIgAappendix, warning=F, fig.width=7, fig.height=5, fig.cap="Correlation between IgA and IgG concentrations in mothers. The data points on the top left show us the samples for which IgA has degraded. Those data points have been omitted."}
+tmp = fisher.test(as.matrix(IgAtoolow[,2:3]))
+
+IgAtoolow %>%
+  bind_rows(IgAtoolow_all) %>%
+  rename(Month = month, `Under 7.5`= u7, `Over 7.5`= o7) %>% 
+  as_flextable(max_row = 13, show_coltype=F) %>% 
+  delete_rows(i = 1, part = "footer") %>%
+  bg(bg = "black", part = "header") %>% 
+  color(color = "white", part = "header") %>% 
+  bg(i=13, bg = "gray80", part = "body") %>% 
+  add_footer_row(values = paste0("Fisher's Exact Test, p=", 
+                                 format(round(tmp$p.value, 2), nsmall=2)),
+                 colwidths = 3)
+
+data_original %>% filter(!is.na(IgATiter), !is.na(IgGTiter)) %>%
+  ggplot(aes(x=IgATiter, y=IgGTiter)) + 
+    geom_point(aes(color = (IgATiter>7.50))) + 
+    theme_bw() + theme(legend.position="bottom") + 
+    scale_y_log10(limits=c(5, 10000), labels=scales::comma) + 
+    scale_x_log10(limits=c(5, 10000), labels=scales::comma) + 
+    coord_equal() + 
+    ylab("IgG (U/mL, log-scale)") + xlab("IgA (U/mL, log-scale)") + 
+    scale_color_manual(values = c("TRUE" = "black", "FALSE" = "darkred"), 
+                     labels = c("TRUE" = "Included", "FALSE" = "Excluded")) +
+  labs(color = "Status") + 
+  stat_cor(method="spearman", label.x.npc=0.2, label.y.npc=0.175, label.sep="; ", p.accuracy=0.001) + 
+  stat_cor(method="spearman", data = data, label.x.npc=0.2, label.y.npc=0.1, label.sep="; ", p.accuracy=0.001) +
+  annotate("text", x = 400, y = 18.5, label = "(all data)", size = 4, hjust = 0) +
+  annotate("text", x = 400, y = 10.5, label = "(data included only)", size = 4, hjust = 0)
+# the one without the IgA<7.5
+
+ggsave("./out/correlation_IgA_IgG.png", height = 6, width = 5.5, units="in", dpi=300, bg=NULL)
+
+```
+
+\newpage
+## Seasonal regression (parametric)
+This is a re-parameterization of time so that a cyclic, seasonal model can be run by ordinary OLS regression.
+
+```{r seasonalols, fig.width=5, fig.height=5, warning=F, message=F}
+
+combined_summary %>% dplyr::select(-part, -statistic) %>%
+  as_flextable(show_coltype=F, max_row=12) %>% 
+  delete_rows(i = 1, part = "footer") %>%
+  bg(bg = "black", part = "header") %>%
+  color(color = "white", part = "header") %>%
+  bg(i=4:8, bg = "gray80", part = "body") %>% # 8:12
+  bold(i=8, bold=T, part="body") %>%
+  italic(i=8, italic=T, part="body") %>%
+  hline(i=3, border=officer::fp_border(style = "solid", width = 1.5), part="body") %>% 
+  add_header_row(values = c("", "IgA", "IgG"), colwidths = c(1, 2, 2), top = TRUE) %>% 
+  set_header_labels(values = c("", "Days", "Months", "Days", "Months")) %>%
+  align(align = "center", part = "header") %>% 
+  hline(i=1:2, border=officer::fp_border(style = "solid", width = 1.5), part="header") %>% 
+  set_table_properties(layout='autofit', width=1,
+                       word_description="Sine model regressions. The p-values are calculated from an F-test.")
+
+fitsine_Ad_qq = gg_qq(residuals(lm_IgA_sine))
+fitsine_Gd_qq = gg_qq(residuals(lm_IgG_sine))
+fitsine_Am_qq = gg_qq(residuals(lm_IgA_sine_m))
+fitsine_Gm_qq = gg_qq(residuals(lm_IgG_sine_m))
+
+plot_grid(fitsine_Ad_qq, fitsine_Gd_qq, fitsine_Am_qq, fitsine_Gm_qq, ncol=2, nrow=2, labels="AUTO") 
+```
+
+\newpage
+## Splines
+```{r seasonalspline, fig.width=5, fig.height=5, warning=F, message=F}
+
+# Final flextable
+all_tidy_gams_df %>% 
+  relocate(prop) %>% 
+  as_flextable(show_coltype=F) %>% 
+  delete_rows(i = 1, part = "footer") %>%
+  bg(bg = "black", part = "header") %>%
+  color(color = "white", part = "header") %>%
+  bold(i=6, bold=T, part="body") %>%
+  italic(i=6, italic=T, part="body") %>%
+  add_header_row(values = c("", "IgA", "IgG"), colwidths = c(1, 2, 2), top = TRUE) %>% 
+  set_header_labels(values = c("", "Days", "Months", "Days", "Months")) %>%
+  align(align = "center", part = "header") %>% 
+  hline(i=1:2, border=officer::fp_border(style = "solid", width = 1.5), part="header") %>% 
+  bg(i=2:6, bg = "gray80", part = "body") %>% 
+  hline(i=1, border=officer::fp_border(style = "solid", width = 1.5), part="body") %>% 
+  set_table_properties(layout='autofit', width=1,
+                       word_description="Generalized additive models (spline models). 
+                                          EDF = effective degrees of freedom. Values 
+                                          close to 1 mean that linear models would fit 
+                                          the data well. Values close to the number of 
+                                          groups/data points mean that there might
+                                          be overfitting. As EDF is a summary 
+                                          statistic rather than a coefficient, 
+                                          no confidence interval is presented. P-values for 
+                                          the model are determined by the F-test.")
+
+## Outputting the QQplots for the gam models
+fitspline_Ad_qq = gg_qq(residuals(IgA_spline))
+fitspline_Gd_qq = gg_qq(residuals(IgA_spline_m))
+fitspline_Am_qq = gg_qq(residuals(IgG_spline))
+fitspline_Gm_qq = gg_qq(residuals(IgG_spline_m))
+
+plot_grid(fitspline_Ad_qq, fitspline_Gd_qq, fitspline_Am_qq, fitspline_Gm_qq, ncol=2, nrow=2, labels="AUTO") 
+
+```
+
+\newpage
+## Other seasonal demarcations
+These ways of splitting the seasons of the year were not used, but were explored in initial data analysis
+
+```{r desc-alternative, fig.width=8, fig.height=4.5, warning=F}
+
+# Rotavirus high and low season from VIDA
+##  Low, high, shoulder season ----
+
+data = data %>% 
+  filter(IgATiter>8) %>% 
+  mutate(RVseason = ifelse(month %in% c(2:4), "High (Feb-Apr)", ifelse(month %in% c(8:11), "Low (Aug-Nov)", 
+                           ifelse(month %in% c(12, 1), "Intermediate (Dec, Jan)", "Intermediate (May-Jul)")))) %>% 
+  mutate(RVseason = factor(RVseason, levels = c("High (Feb-Apr)",
+                                                "Intermediate (May-Jul)",
+                                                "Low (Aug-Nov)", 
+                                                "Intermediate (Dec, Jan)")))
+
+GMT_summaries2 = data %>% 
+  group_by(RVseason) %>% 
+  dplyr::summarize(N = n(), 
+                   IgA_med = ci_string_dec(quantile(IgATiter, c(0.5, 0.25, 0.75)), 0), 
+                   IgA_GMT = ci_string_dec(c(GMT(IgATiter), GMT_CI_se(IgATiter)), 0), 
+                   IgG_med = ci_string_dec(quantile(IgGTiter, c(0.5, 0.25, 0.75)), 0), 
+                   IgG_GMT = ci_string_dec(c(GMT(IgGTiter), GMT_CI_se(IgGTiter)), 0))
+# shoulder seems lower than low season, suggesting there is a delay in the titer patterns, which makes sense...
+
+GMT_summaries2 %>% 
+  as_flextable(max_row = 12, show_coltype=F) %>% 
+  delete_rows(i = 1, part = "footer") %>%
+  # colformat_double() %>% autofit() %>% 
+  bg(bg = "black", part = "header") %>% 
+  color(color = "white", part = "header") %>% 
+  add_header_row(values = c("", "IgA", "IgG"), colwidths = c(2, 2, 2), top = TRUE) %>% 
+  set_header_labels(values = c("Season", "N", "GMT (95% CI)", "Median (IQR)", "GMT (95% CI)", "Median (IQR)")) %>%
+  align(align = "center", part = "header") %>% 
+  hline(i=1:2, border=officer::fp_border(style = "solid", width = 1.5), part="header")
+
+my_comparisons_primary = list( c("High (Feb-Apr)", "Low (Aug-Nov)"))
+
+BP_LHS_IgA = data %>%
+  filter(RVseason %in% c("High (Feb-Apr)", "Low (Aug-Nov)")) %>% 
+  ggplot(aes(x=RVseason, y=IgATiter)) +
+  geom_dotplot(binaxis="y",stackdir='center',binwidth = 0.05, fill="gray50", color=NA) +
+  geom_boxplot(fill=NA) +
+  scale_y_log10(limits=c(10,20000), labels = scales::comma) +
+  ylab("Ig (U/mL, log-scale)") + xlab(NULL) + ggtitle("IgA by Season") +
+  theme_bw() + 
+  ggpubr::stat_compare_means(comparisons = my_comparisons_primary, method="wilcox")
+
+BP_LHS_IgG = data %>% 
+  filter(RVseason %in% c("High (Feb-Apr)", "Low (Aug-Nov)")) %>% 
+  ggplot(aes(x=RVseason, y=IgGTiter)) +
+  geom_dotplot(binaxis="y",stackdir='center',binwidth = 0.05, fill="gray50", color=NA) +
+  geom_boxplot(fill=NA) +
+  scale_y_log10(limits=c(10,20000), labels = scales::comma) +
+  ylab(NULL) + xlab(NULL) + ggtitle("IgG by Season") +
+  theme_bw() + 
+  ggpubr::stat_compare_means(comparisons = my_comparisons_primary, method="wilcox")
+
+plot_grid(BP_LHS_IgA, BP_LHS_IgG, ncol=2)
+
+ggsave("./binary_seasons.png", height = 3, width = 6, units="in", dpi=300, bg=NULL)
+
+IgAseason_log.aov <- anova(lm(log10(IgATiter) ~ factor(RVseason), data = data))
+#IgA_log.aov %>% as_flextable(show_coltype=F)
+
+fit1Aseason = lm(log10(IgATiter) ~ factor(RVseason), data = data)
+
+names(fit1Aseason$coefficients) = c("Intercept", "Intermediate (May-Jul)", 
+                                    "Low (Aug-Nov)", "Intermediate (Dec, Jan)")
+
+tmp_coeff = summary(fit1Aseason)$coefficients
+tmp = tmp_coeff %>% as.data.frame() %>%
+  mutate(est = 10^(Estimate),
+         lci = 10^(Estimate-1.96*`Std. Error`), 
+         uci = 10^(Estimate+1.96*`Std. Error`)) %>% 
+  mutate(est_ci = paste0(my_format_mod(est, 2, 3), " (", 
+                         my_format_mod(lci, 2, 3), ", ", my_format_mod(uci, 2, 3), ")")) %>% 
+  mutate(pstar = ifelse(`Pr(>|t|)`<0.001, "***", 
+                        ifelse(`Pr(>|t|)`<0.01, "**", 
+                               ifelse(`Pr(>|t|)`<0.05, "*", ""))))
+
+fit1Apretty = data.frame(Seasons = c("Intercept", "High (Feb-Apr)", "Intermediate (May-Jul)", 
+                              "Low (Aug-Nov)", "Intermediate (Dec, Jan)"), 
+          Est_A = c(tmp$est_ci[1], "Ref.", tmp$est_ci[2:4]), 
+          P_A = c(tmp$pstar[1], "", tmp$pstar[2:4]))
+
+tmp_1A_sum = summary(fit1Aseason)
+tmp_1A_sum_F = tmp_1A_sum$fstatistic["value"]
+tmp_1A_sum_numdf = tmp_1A_sum$fstatistic["numdf"]
+tmp_1A_sum_dendf = tmp_1A_sum$fstatistic["dendf"]
+
+tmp_ft_A = data.frame(Seasons = c("N. obs", "SE Residuals", "R2; Adj-R2", "F-stat", "P-value"), 
+                      Est_A = c(length(fit1Aseason$fitted.values), 
+                                my_format(sd(fit1Aseason$residuals), 2),
+                                paste0(my_format(summary(fit1Aseason)$r.squared, 2), "; ", my_format(summary(fit1Aseason)$adj.r.squared, 2)),
+                                my_format(tmp_1A_sum_F, 2),
+                                my_smallvalue(pf(tmp_1A_sum_F, tmp_1A_sum_numdf, tmp_1A_sum_dendf, lower.tail = F), 3)))
+
+
+# tmp_ft_A = fit1A %>% as_flextable() %>%
+#   delete_part(part="body") %>% 
+#   delete_part(part="header") 
+
+tmp_pretty_A = fit1Apretty %>% as_flextable(max_row = 13, show_coltype=F) %>% 
+  delete_rows(i = 1, part = "footer") %>%
+  bg(bg = "black", part = "header") %>% 
+  color(color = "white", part = "header")
+
+# vtmp_pretty_A$footer = tmp_ft_A$footer
+
+## IgG ------
+IgGseason_log.aov = anova(lm(log10(IgGTiter) ~ factor(RVseason), data = data))
+
+# lm(log2(IgGTiter) ~ factor(month, levels=c(10, 1:9, 11:12)), data = data) %>% summary
+fit1Gseason = lm(log10(IgGTiter) ~ factor(RVseason), data = data) # %>% summary
+
+names(fit1Gseason$coefficients) = c("Intercept", "Intermediate (May-Jul)", 
+                              "Low (Aug-Nov)", "Intermediate (Dec, Jan)")
+
+tmp_coeff = summary(fit1Gseason)$coefficients
+tmp = tmp_coeff %>% as.data.frame() %>%
+  mutate(est = 10^(Estimate),
+         lci = 10^(Estimate-1.96*`Std. Error`), 
+         uci = 10^(Estimate+1.96*`Std. Error`)) %>% 
+  mutate(est_ci = paste0(my_format_mod(est, 2, 3), " (", 
+                my_format_mod(lci, 2, 3), ", ", my_format_mod(uci, 2, 3), ")")) %>% 
+  mutate(pstar = ifelse(`Pr(>|t|)`<0.001, "***", 
+                ifelse(`Pr(>|t|)`<0.01, "**", 
+                ifelse(`Pr(>|t|)`<0.05, "*", ""))))
+
+fit1Gpretty = data.frame(Seasons = c("Intercept", "High (Feb-Apr)", "Intermediate (May-Jul)", 
+                              "Low (Aug-Nov)", "Intermediate (Dec, Jan)"), 
+          Est_G = c(tmp$est_ci[1], "Ref.", tmp$est_ci[2:4]), 
+          P_G = c(tmp$pstar[1], "", tmp$pstar[2:4]))
+
+tmp_1G_sum = summary(fit1Gseason)
+tmp_1G_sum_F = tmp_1G_sum$fstatistic["value"]
+# tmp_1G_sum_numdf = tmp_1G_sum$fstatistic["numdf"]
+# tmp_1G_sum_dendf = tmp_1G_sum$fstatistic["dendf"]
+
+tmp_ft_G = data.frame(Seasons = c("N. obs", "SE Residuals", "R2; Adj-R2", "F-stat", "P-value"), 
+                      Est_G = c(length(fit1Gseason$fitted.values), 
+                                my_format(sd(fit1Gseason$residuals), 2),
+                                paste0(my_smallvalue(summary(fit1Gseason)$r.squared, 2), "; ", my_smallvalue(summary(fit1Gseason)$adj.r.squared, 2)),
+                                my_format(tmp_1G_sum_F, 2),
+                                my_smallvalue(fpvalue(fit1Gseason)$Fp, 3)))
+# pf(tmp_1G_sum_F, tmp_1G_sum_numdf, tmp_1G_sum_dendf, lower.tail = F)
+
+fit1Apretty %>% 
+  bind_rows(tibble(tmp_ft_A)) %>%
+  full_join(fit1Gpretty %>% bind_rows(tmp_ft_G)) %>%
+  as_flextable(max_row = 30, show_coltype=F, spread_first_col = TRUE) %>% 
+  delete_part(part = "footer") %>%
+  bg(bg = "black", part = "header") %>% 
+  color(color = "white", part = "header") %>% 
+  bg(i=6:10, bg = "gray80", part = "body") %>% 
+  hline(i=5, border=officer::fp_border(style = "solid", width = 2), part="body") %>%
+  add_header_row(values = c("", "IgA", "IgG"), colwidths = c(1, 2, 2), top = TRUE) %>% 
+  hline(i=1, border=officer::fp_border(style = "solid", width = 2), part="header") %>% 
+  # align(align = "center", part = "header") %>% 
+  line_spacing(space = 1, part = "all") %>% 
+  add_footer_lines("Signif. codes: 0 ≤ '***' < 0.001 < '**' < 0.01 < '*' < 0.05") %>% 
+  italic(part="footer", italic=T) # %>% 
+
+```

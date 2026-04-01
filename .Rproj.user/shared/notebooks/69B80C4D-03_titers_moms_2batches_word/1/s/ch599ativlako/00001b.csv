@@ -1,0 +1,7 @@
+"0",""
+"0","data %>% "
+"0","  ggplot(aes(x=factor(month), fill=factor(baby_sex))) + "
+"0","  geom_bar(position = ""fill"") + "
+"0","  scale_x_discrete(labels=month.abb) + "
+"0","  ylab(""Percent boys"") + xlab("""") + # ggtitle(""IgA by month of birth"") + "
+"0","  theme_bw() + theme(legend.position=""bottom"")"

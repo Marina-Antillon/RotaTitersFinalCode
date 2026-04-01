@@ -1,0 +1,4 @@
+"0",""
+"0","data %>% dplyr::summarize(mean = mean(mat_age), "
+"0","                      IQR = range_pretty(quantile(mat_age, c(0.25, 0.75))),"
+"0","                      Range = range_pretty(range(mat_age)))"

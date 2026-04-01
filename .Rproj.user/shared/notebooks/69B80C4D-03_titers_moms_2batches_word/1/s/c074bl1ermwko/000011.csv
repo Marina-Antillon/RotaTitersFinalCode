@@ -1,0 +1,7 @@
+"0",""
+"0","fitsine_Ad_qq = gg_qq(residuals(lm_IgA_sine))"
+"0","fitsine_Gd_qq = gg_qq(residuals(lm_IgG_sine))"
+"0","fitsine_Am_qq = gg_qq(residuals(lm_IgA_sine_m))"
+"0","fitsine_Gm_qq = gg_qq(residuals(lm_IgG_sine_m))"
+"0",""
+"0","plot_grid(fitsine_Ad_qq, fitsine_Gd_qq, fitsine_Am_qq, fitsine_Gm_qq, ncol=2, nrow=2, labels=""AUTO"") "
